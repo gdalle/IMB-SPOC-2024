@@ -21,6 +21,8 @@ begin
 	using ReverseDiff: ReverseDiff
 	using Zygote: Zygote
 	using Symbolics
+
+	using FrankWolfe
 	using InferOpt
 	
 	using Graphs
@@ -29,6 +31,7 @@ begin
 	using Colors
 	using GraphPlot
 	using Plots
+	using LaTeXStrings
 
 	using PlutoUI
 	using PlutoTeachingTools
@@ -37,9 +40,6 @@ begin
 	using LinearAlgebra
 	using SparseArrays
 end
-
-# ╔═╡ 93112f7f-f0a5-47b7-87bc-faa1ac6b5cd1
-PlutoUI.TableOfContents(depth=2)
 
 # ╔═╡ f726bc65-e8c3-4f1c-90da-2836bfb90700
 md"""
@@ -65,27 +65,62 @@ present_button()
 
 # ╔═╡ f530161f-6543-4f53-914e-f68ff54d2b29
 md"""
-# 0. Motivation
+# 0. Introduction
+"""
+
+# ╔═╡ 6e3ba0eb-7712-4f2d-9f34-9a7b4b141b81
+md"""
+## Goal of this talk
+"""
+
+# ╔═╡ e8a8d193-02c5-4903-96a4-969de841232a
+md"""
+Teach you how to use a combinatorial algorithm inside a deep neural network
+
+!!! tip "The paper"
+	[Learning with combinatorial optimization layers: a probabilistic approach](https://arxiv.org/abs/2207.13513), Dalle et al. (2022)
+
+But why???
 """
 
 # ╔═╡ ac6e1109-c85f-49ca-b811-04aad7028939
 md"""
-## Predicting structured outputs
+## Enhance learning or optimization
 """
 
-# ╔═╡ 28808acb-0787-48b9-a5f8-80d521671a5e
+# ╔═╡ 87ca85ad-d1cf-4707-859b-268f647a15c8
 md"""
-## Making solvers faster
-"""
-
-# ╔═╡ afc406c8-46be-4ca3-bf15-745fa4d89a4a
-md"""
-# 1. Computing derivatives
+| Predict structured outputs | Tackle hard problems faster |
+|---|---|
+| Shortest paths on Warcraft maps | Stochastic vehicle scheduling |
 """
 
 # ╔═╡ 027480a5-6a05-44e5-8cb8-fc6d256af6c2
 md"""
-## Differentiable programming
+## Big picture: differentiable programming
+"""
+
+# ╔═╡ 605c2a9f-08c9-4b6f-83d5-665b287b5050
+md"""
+Any computer program should be differentiable with respect to all its parameters
+
+- Basic everyday functions
+- Physical simulations
+- Probabilistic programs
+- Optimization solvers... even discrete ones?
+"""
+
+# ╔═╡ 8de5f9c3-1e1e-499f-8953-4cbebdc764ec
+md"""
+## The program
+"""
+
+# ╔═╡ 93112f7f-f0a5-47b7-87bc-faa1ac6b5cd1
+PlutoUI.TableOfContents(depth=1)
+
+# ╔═╡ afc406c8-46be-4ca3-bf15-745fa4d89a4a
+md"""
+# 1. Computing derivatives
 """
 
 # ╔═╡ e3f78193-69d6-4f11-afd9-6773881be346
@@ -161,7 +196,7 @@ md"""
 """
 
 # ╔═╡ c6f5c366-d6fa-4b28-8dcb-948c45b5ea26
-h = 10^logh
+h = 10^logh;
 
 # ╔═╡ 46f39e3a-5057-477e-83e4-5514122dc5b5
 (mysqrt(x0 + h) - mysqrt(x0)) / h
@@ -247,7 +282,7 @@ md"""
 """
 
 # ╔═╡ d16875d2-8c53-4e77-bf60-02852d1b453e
-ReverseDiff.gradient(mysqrt_mean, rand(100))
+ReverseDiff.gradient(mysqrt_mean, rand(100))[1]
 
 # ╔═╡ 0c90306f-19f9-4a07-aaec-334e7f32dae0
 md"""
@@ -266,19 +301,28 @@ It interprets source code in a baroque way... but sometimes it cannot.
 """
 
 # ╔═╡ eceddefd-eaf7-4253-9fea-29dcfc1cf6df
-function add_one!(x::AbstractVector)
+function add_one!(x::Vector{Float64})
 	for i in eachindex(x)
 		x[i] += 1
 	end
 	return x
 end
 
+# ╔═╡ 70009850-6399-4926-a1ce-f973ecd14bb1
+ForwardDiff.jacobian(add_one!, [1.0])
+
 # ╔═╡ 491e38a0-9c22-4f10-bb43-1ae651bcd5f8
-ReverseDiff.jacobian(add_one!, rand(100))
+ReverseDiff.jacobian(add_one!, [1.0])
 
 # ╔═╡ c0083a70-507a-4e0a-9a6f-d26d88e72bb2
 md"""
-## To sum up
+## To remember
+"""
+
+# ╔═╡ e237995d-b5b2-460e-9a83-a80e56b781f4
+md"""
+- Algorithmic differentiation is the only way to compute exact derivatives at reasonable cost
+- When it doesn't work... we can hack it
 """
 
 # ╔═╡ 14cacfe2-6489-4538-b416-bcf9432d4ab2
@@ -286,15 +330,246 @@ md"""
 # 2. Combinatorial optimization layers
 """
 
-# ╔═╡ 0e0c98b1-9592-4734-9985-cc80b37843f1
-height, width = 5, 10
+# ╔═╡ edda66ac-3770-4ea6-bd50-3b984613ea32
+md"""
+## Deep learning 101
+"""
+
+# ╔═╡ a0e01618-1385-4dc8-8a7c-a42a0cd06ab0
+md"""
+A neural network is a function $y = \varphi_\theta(x)$ parametrized by $\theta$, usually a composition of basic layers like $x \mapsto \sigma(Wx + b)$
+
+It is trained by gradient descent, minimizing the empirical loss $\sum_{i=1}^{n} \ell(y_i, \varphi_\theta(x_i))$
+"""
+
+# ╔═╡ 3bb29eed-9554-4ff1-bc91-1a1e28090322
+md"""
+## Combinatorial optimization 101
+"""
+
+# ╔═╡ b69ce643-a538-4d1e-bff7-377f19a0d8b3
+md"""
+A linear program $z = f(y)$ is an optimization problem with affine constraints and a linear objective:
+
+$$f(y) = \arg\max_v y^\top v \quad \text{s.t.} \quad Av \leq b$$
+
+Very efficient generic solvers exist (even better than convex optimization)
+
+We also have dedicated algorithms for special cases (shortest paths for instance)
+"""
+
+# ╔═╡ 65f3285a-3d92-432c-ac6d-04eb8e04fb3b
+md"""
+## Hybrid methods
+"""
+
+# ╔═╡ b6dae6d4-0c65-40d8-a95d-5b023e703b10
+md"""
+What if we want to combine a neural network $\varphi_w$ and a linear program $f$?
+
+We need to compute the following derivative for training:
+
+$$\partial_\theta f(\varphi_\theta(x)) = \partial_y f(\varphi_\theta(x)) \cdot \partial_\theta \varphi_\theta(x)$$
+
+This requires differentiating through an optimization algorithm
+"""
+
+# ╔═╡ bedfb759-fb50-4d50-abfd-9e4925c53d69
+md"""
+## Shortest paths on a grid
+"""
 
 # ╔═╡ f9e8fccd-d4d9-4c5e-9a77-0c131eba5fe8
-costs = rand(height, width)
+costs = rand(6, 12)
+
+# ╔═╡ f2cfd2fb-b58c-4146-8a35-62824b8f9eb5
+md"""
+## A technical problem
+"""
+
+# ╔═╡ 13a4e329-3f5f-4ab3-b460-ce3a333f3063
+md"""
+Solvers use code on which we have no control: possibly in another language, or with fancy constructs that autodiff cannot handle.
+"""
+
+# ╔═╡ 081f54e7-56f9-41d4-b48e-fe2f99c76897
+md"""
+## A philosophical problem
+"""
+
+# ╔═╡ 0ee6c0f0-254a-43ff-88c0-96318af82cd6
+md"""
+Even if we can get derivatives, they will be zero everywhere!!!
+"""
+
+# ╔═╡ 3ba4d758-f9e8-499e-a004-6d195eab3410
+md"""
+## Polytope geometry
+"""
+
+# ╔═╡ 33797756-2ec6-44d8-82c0-3bc5ad1f65be
+md"""
+The feasible set of a linear program $\{x: Ax \leq b\}$ defines a polytope.
+
+Its optimal solution is always a vertex.
+"""
+
+# ╔═╡ aabd4bdc-dbee-4801-a6ff-ad789151320e
+V = [[cospi(2k/7), sinpi(2k/7)] for k in 0:6]
+
+# ╔═╡ 9035a994-e339-459c-96a2-9ba640b48b40
+maximizer(y; V) = V[argmax(dot(y, v) for v in V)]
+
+# ╔═╡ 1bdece17-462b-4e48-9da6-ad6032d86e0a
+set_angle_oracle = md"""
+angle = $(@bind angle_oracle Slider(0:0.1:2π; default=π, show_value=false))
+"""
+
+# ╔═╡ b87768e2-92e8-4486-ab97-a7196b70eeb6
+md"""
+## The probabilistic approach
+"""
+
+# ╔═╡ 618628d1-ca9a-4211-b546-2f3589dd6457
+md"""
+Instead of returning one vertex, return a distribution over the set of vertices
+"""
+
+# ╔═╡ 8cc02b8c-6554-4b18-bf23-561ffb3f97bb
+begin
+	set_angle_perturbed = md"""
+	angle = $(@bind angle_perturbed Slider(0:0.1:2π; default=π, show_value=false))
+	""";
+	set_nb_samples_perturbed = md"""
+	samples = $(@bind nb_samples_perturbed Slider(1:20; default=0, show_value=true))
+	""";
+	set_epsilon_perturbed = md"""
+	epsilon = $(@bind epsilon_perturbed Slider(0.0:0.05:1.0; default=0.0, show_value=true))
+	""";
+end;
+
+# ╔═╡ 462c2a2d-310b-4091-bb49-1bf13ed120d3
+perturbed_layer = InferOpt.PerturbedAdditive(
+	maximizer; ε=epsilon_perturbed, nb_samples=nb_samples_perturbed, seed=0,
+)
+
+# ╔═╡ 83ba9e3f-a4eb-4f68-9e78-45f1986f4a5a
+let
+	y = 0.5 .* [cos(angle_perturbed), sin(angle_perturbed)]
+	Zygote.jacobian(y -> perturbed_layer(y; V), y)[1]
+end
+
+# ╔═╡ 73f33c4c-4e0d-4e0e-9f03-93f3ad1bc9f7
+set_angle_perturbed
+
+# ╔═╡ 4063f211-5946-49c0-8d7b-e550aa115cb2
+TwoColumn(set_epsilon_perturbed, set_nb_samples_perturbed)
+
+# ╔═╡ 27cf0c8c-b6d8-4e25-9625-c4dbcf0c25de
+md"""
+## Back to shortest paths
+"""
+
+# ╔═╡ 780c72b0-d038-4577-b7fa-0a85514a0762
+md"""
+Instead of one path, we select several
+"""
+
+# ╔═╡ 7ab27251-1648-473c-a642-1a82f10adc3f
+begin
+	set_nb_samples_path = md"""
+	samples = $(@bind nb_samples_path Slider(1:20; default=0, show_value=true))
+	""";
+	set_epsilon_path = md"""
+	epsilon = $(@bind epsilon_path Slider(0.0:0.02:1.0; default=0.0, show_value=true))
+	""";
+end;
+
+# ╔═╡ 7078b24c-75bd-43bc-b234-091a68ed7e76
+md"""
+## What do the gradients mean?
+"""
+
+# ╔═╡ f3cc5d70-fd3a-4246-8b45-83ac12943978
+md"""
+If a cell cost increases, the path is less likely to cross it
+"""
+
+# ╔═╡ b6a966b6-d3e2-4a79-8ef5-d70bbec9379a
+begin
+	set_i_path = md"""
+	i = $(@bind i_path NumberField(1:size(costs, 1), default=1))
+	"""
+	set_j_path = md"""
+	j = $(@bind j_path NumberField(1:size(costs, 2), default=1))
+	"""
+end;
+
+# ╔═╡ 4dac9f6e-9d53-4e52-946b-f149a99669ec
+TwoColumn(set_i_path, set_j_path)
+
+# ╔═╡ 68ee2b00-39b3-425d-87be-ec9ec445dcea
+md"""
+## I wanna play too!!!
+"""
+
+# ╔═╡ 24716999-4293-4f47-901f-fc3fae2b4324
+md"""
+Check out our Julia package
+
+> <https://github.com/axelparmentier/InferOpt.jl>
+"""
+
+# ╔═╡ 1034c7c6-1fa2-4307-af58-a65845dc929b
+md"""
+## How does it work?
+"""
+
+# ╔═╡ c7d03fde-549d-4ef8-9469-f5561ef4a69d
+md"""
+A mix of math and code:
+1. Define principled approximations for the piecewise-constant function $f$
+2. Hack into alorithmic differentiation to override its default behavior
+"""
 
 # ╔═╡ 69cb393b-f212-480d-91df-05f32cb82271
 md"""
 # 3. Perturbation and regularization
+"""
+
+# ╔═╡ 7fcbb3e2-eff2-412e-a66a-295b8cb80440
+md"""
+## Wish list
+"""
+
+# ╔═╡ 5c7fb170-a672-4887-a9f8-f72514d583d7
+md"""
+Smoothness, approximation, tractability, generality
+"""
+
+# ╔═╡ 5971446a-9ae4-4ef3-a709-076c15e79b67
+md"""
+## General framework
+"""
+
+# ╔═╡ aa779ec8-9d01-475f-90bf-b55e6c2d280d
+md"""
+Probability distributions and expectations
+"""
+
+# ╔═╡ 15b07f2c-57a5-4692-8a1e-15af48d56439
+md"""
+## Perturbation
+"""
+
+# ╔═╡ 048d5f9d-22e8-4d33-91c5-0492ee202dd6
+md"""
+## Regularization
+"""
+
+# ╔═╡ 81a9567d-9d43-4df0-9f90-b27dc2e4669b
+md"""
+## Frank-Wolfe and implicit differentiation
 """
 
 # ╔═╡ 2d030f85-d8aa-43c3-9c33-01d0e22d6100
@@ -307,6 +582,14 @@ md"""
 md"""
 # Appendix
 """
+
+# ╔═╡ f66b99af-6215-4b36-baed-9cb77ae99d4f
+md"""
+## Colors
+"""
+
+# ╔═╡ b1fc612f-5482-4ed9-a1d9-4c30dd7ca87d
+logocolors = Colors.JULIA_LOGO_COLORS
 
 # ╔═╡ d72523a8-51d6-4f4b-bf69-393c020b2cef
 md"""
@@ -411,11 +694,19 @@ end
 # ╔═╡ 5004b68d-263f-45c5-a8cd-a0726709c294
 path = shortest_path(costs)
 
-# ╔═╡ ce2c2894-683d-4f8e-9ed2-38bd27caf0f1
-perturbed = PerturbedMultiplicative(shortest_path; ε=1.0, nb_samples=10)
+# ╔═╡ 752adf10-cb29-48ec-abc6-f4efa633b78c
+ReverseDiff.jacobian(shortest_path, costs)
 
-# ╔═╡ 456447fd-e6d6-45e9-b742-21d002da31fb
-perturbed_path = perturbed(costs)
+# ╔═╡ be9d938f-9a8f-4fde-94bc-5acd8739b437
+ForwardDiff.jacobian(shortest_path, costs)
+
+# ╔═╡ aa6a00f3-10d2-44f4-b989-999879bf83c7
+perturbed_shortest_path = InferOpt.PerturbedMultiplicative(
+	shortest_path; ε=0.5, nb_samples=100
+)
+
+# ╔═╡ 96559255-b701-4303-b7de-d8d2fb5c4714
+fuzzy_path = perturbed_shortest_path(costs)
 
 # ╔═╡ 1c527603-b6b8-4f9b-9f03-9d4ccace7e06
 function plot_grid(costs::AbstractMatrix, path::AbstractMatrix)
@@ -439,8 +730,156 @@ end
 # ╔═╡ 9543aa78-73e4-43c8-8041-4c5afa53f4ed
 plot_path(path)
 
-# ╔═╡ 4fbb9952-e03f-475c-adfd-134e397d5ceb
-plot_path(perturbed_path)
+# ╔═╡ df101930-43d6-4e5c-ab2d-ad496ff7c7a6
+plot_path(fuzzy_path)
+
+# ╔═╡ 9251f9ba-af9a-4e3d-aaf6-25b66191c5aa
+let
+	v = coord_to_index(i_path, j_path, size(costs, 1), size(costs, 2))
+	J = Zygote.jacobian(perturbed_shortest_path, costs)[1]
+	grad_mat = reshape(J[:, v], size(costs))
+	plot_path(grad_mat)
+end
+
+# ╔═╡ 7f1733f5-962a-43a5-9330-f4b58c1dff9f
+md"""
+## Polytopes
+"""
+
+# ╔═╡ 06554187-bcda-452c-97f8-23f55698a235
+function get_angle(v)
+	@assert !(norm(v) ≈ 0)
+	v = v ./ norm(v)
+	if v[2] >= 0
+		return acos(v[1])
+	else
+		return π + acos(-v[1])
+	end
+end
+
+# ╔═╡ 7c210666-0c05-4309-8f28-81793ceb8087
+function init_plot(title)
+	pl = plot(;
+		aspect_ratio=:equal,
+		legend=:outerleft,
+		xlim=(-1.1, 1.1),
+		ylim=(-1.1, 1.1),
+		title=title,
+	)
+	return pl
+end
+
+# ╔═╡ e7b33a1e-07e2-4cb9-baaf-9b753cc0bf8f
+function plot_polytope!(pl, V)
+	plot!(
+		vcat(map(first, V), first(V[1])),
+		vcat(map(last, V), last(V[1]));
+		fillrange=0,
+		fillcolor=:gray,
+		fillalpha=0.2,
+		linecolor=:black,
+		label=L"\mathrm{conv}(\mathcal{V})"
+	)
+end
+
+# ╔═╡ 5c56abb4-07ed-4655-bc07-92485dd30d6a
+function plot_objective!(pl, θ)
+	plot!(
+		pl,
+		[0., θ[1]],
+		[0., θ[2]],
+		color=:black,
+		arrow=true,
+		lw=2,
+		label=nothing
+	)
+	annotate!(
+		pl,
+		[-0.2*θ[1]],
+		[-0.2*θ[2]],
+		[L"y"],
+	)
+	return θ
+end
+
+# ╔═╡ f35ed97d-ce20-4b6c-bf58-7b34d5cf0031
+function plot_maximizer!(pl, θ, V, maximizer)
+	ŷ = maximizer(θ; V)
+	scatter!(
+		pl,
+		[ŷ[1]],
+		[ŷ[2]];
+		color=logocolors.red,
+		markersize=9,
+		markershape=:square,
+		label=L"f(y)"
+	)
+end
+
+# ╔═╡ e6432ae9-7779-4666-857a-58141964cca1
+let
+	θ = 0.5 .* [cos(angle_oracle), sin(angle_oracle)]
+	pl = init_plot("")
+	plot_polytope!(pl, V)
+	plot_objective!(pl, θ)
+	plot_maximizer!(pl, θ, V, maximizer)
+	pl
+end
+
+# ╔═╡ c0d183c4-dee0-4465-a25b-01284654e1a1
+function plot_distribution!(pl, probadist)
+	A = probadist.atoms
+	As = sort(A, by=get_angle)
+	p = probadist.weights
+	plot!(
+		pl,
+		vcat(map(first, As), first(As[1])),
+		vcat(map(last, As), last(As[1]));
+		fillrange=0,
+		fillcolor=:blue,
+		fillalpha=0.1,
+		linestyle=:dash,
+		linecolor=logocolors.blue,
+		label=L"\mathrm{conv}(\hat{p}(y))"
+	)
+	scatter!(
+		pl,
+		map(first, A),
+		map(last, A);
+		markersize=25 .* p .^ 0.5,
+		markercolor=logocolors.blue,
+		markerstrokewidth=0,
+		markeralpha=0.4,
+		label=L"\hat{p}(y)"
+	)
+end
+
+# ╔═╡ 71c4d2de-a653-4a03-8eec-98141b6d9be0
+function plot_expectation!(pl, probadist)
+	ŷΩ = compute_expectation(probadist)
+	scatter!(
+		pl,
+		[ŷΩ[1]],
+		[ŷΩ[2]];
+		color=logocolors.purple,
+		markersize=10,
+		markershape=:hexagon,
+		label=L"\hat{f}(y)"
+	)
+end
+
+# ╔═╡ 05845c55-8af1-483d-8294-9e266c2db405
+let
+	θ = 0.5 .* [cos(angle_perturbed), sin(angle_perturbed)]
+	probadist = compute_probability_distribution(perturbed_layer, θ; V,)
+	pl = init_plot("")
+	plot_polytope!(pl, V)
+	plot_objective!(pl, θ)
+	plot_distribution!(pl, probadist)
+	plot_maximizer!(pl, θ, V, maximizer)
+	plot_expectation!(pl, probadist)
+	pl
+end
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -448,9 +887,11 @@ PLUTO_PROJECT_TOML_CONTENTS = """
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+FrankWolfe = "f55ce6ea-fdc5-4628-88c5-0087fe54bd30"
 GraphPlot = "a2cc645c-3eea-5389-862e-a155d0052231"
 Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
 InferOpt = "4846b161-c94e-4150-8dac-c7ae193c601f"
+LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PlutoTeachingTools = "661c6b06-c737-4d37-b85c-46df65de6f69"
@@ -466,9 +907,11 @@ Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 ChainRulesCore = "~1.19.1"
 Colors = "~0.12.10"
 ForwardDiff = "~0.10.36"
+FrankWolfe = "~0.3.2"
 GraphPlot = "~0.5.2"
 Graphs = "~1.9.0"
 InferOpt = "~0.6.0"
+LaTeXStrings = "~1.3.1"
 Plots = "~1.40.0"
 PlutoTeachingTools = "~0.2.14"
 PlutoUI = "~0.7.55"
@@ -484,7 +927,7 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.10.0"
 manifest_format = "2.0"
-project_hash = "8b0d95c83dac0806f4d2eef8a53453c2a774b450"
+project_hash = "a7a0c9878143771d9daa212de198d8d379b4ef75"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "41c37aa88889c171f1300ceac1313c06e891d245"
@@ -538,6 +981,18 @@ git-tree-sha1 = "62e51b39331de8911e4a7ff6f5aaf38a5f4cc0ae"
 uuid = "ec485272-7323-5ecc-a04f-4719b315124d"
 version = "0.2.0"
 
+[[deps.Arpack]]
+deps = ["Arpack_jll", "Libdl", "LinearAlgebra", "Logging"]
+git-tree-sha1 = "9b9b347613394885fd1c8c7729bfc60528faa436"
+uuid = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
+version = "0.5.4"
+
+[[deps.Arpack_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "OpenBLAS_jll", "Pkg"]
+git-tree-sha1 = "5ba6c757e8feccf03a1554dfaf3e26b3cfc7fd5e"
+uuid = "68821587-b530-5797-8361-c406ea357684"
+version = "3.5.1+1"
+
 [[deps.ArrayInterface]]
 deps = ["Adapt", "LinearAlgebra", "Requires", "SparseArrays", "SuiteSparse"]
 git-tree-sha1 = "bbec08a37f8722786d87bedf84eae19c020c4efa"
@@ -590,6 +1045,12 @@ uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 git-tree-sha1 = "aebf55e6d7795e02ca500a689d326ac979aaf89e"
 uuid = "9718e550-a3fa-408a-8086-8db961cd8217"
 version = "0.1.1"
+
+[[deps.BenchmarkTools]]
+deps = ["JSON", "Logging", "Printf", "Profile", "Statistics", "UUIDs"]
+git-tree-sha1 = "f1f03a9fa24271160ed7e73051fba3c1a759b53f"
+uuid = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+version = "1.4.0"
 
 [[deps.Bijections]]
 git-tree-sha1 = "c9b163bd832e023571e86d0b90d9de92a9879088"
@@ -645,6 +1106,12 @@ deps = ["InteractiveUtils", "UUIDs"]
 git-tree-sha1 = "c0216e792f518b39b22212127d4a84dc31e4e386"
 uuid = "da1fd8a2-8d9e-5ec2-8556-3022fb5608a2"
 version = "1.3.5"
+
+[[deps.CodecBzip2]]
+deps = ["Bzip2_jll", "Libdl", "TranscodingStreams"]
+git-tree-sha1 = "c0ae2a86b162fb5d7acc65269b469ff5b8a73594"
+uuid = "523fee87-0ab8-5b00-afb7-3ecf72e48cfd"
+version = "0.8.1"
 
 [[deps.CodecZlib]]
 deps = ["TranscodingStreams", "Zlib_jll"]
@@ -930,6 +1397,12 @@ weakdeps = ["StaticArrays"]
     [deps.ForwardDiff.extensions]
     ForwardDiffStaticArraysExt = "StaticArrays"
 
+[[deps.FrankWolfe]]
+deps = ["Arpack", "GenericSchur", "Hungarian", "LinearAlgebra", "MathOptInterface", "Printf", "ProgressMeter", "Random", "Setfield", "SparseArrays", "TimerOutputs"]
+git-tree-sha1 = "8de8919487364f75d3d330f64176c3cb0afee566"
+uuid = "f55ce6ea-fdc5-4628-88c5-0087fe54bd30"
+version = "0.3.2"
+
 [[deps.FreeType2_jll]]
 deps = ["Artifacts", "Bzip2_jll", "JLLWrappers", "Libdl", "Zlib_jll"]
 git-tree-sha1 = "d8db6a5a2fe1381c1ea4ef2cab7c69c2de7f9ea0"
@@ -987,6 +1460,12 @@ git-tree-sha1 = "bec9115c4fb800d6174bfac3b982cfee367de5d4"
 uuid = "d2c73de3-f751-5644-a686-071e5b155ba9"
 version = "0.73.0+0"
 
+[[deps.GenericSchur]]
+deps = ["LinearAlgebra", "Printf"]
+git-tree-sha1 = "fb69b2a645fa69ba5f474af09221b9308b160ce6"
+uuid = "c145ed77-6b09-5dd9-b285-bf645a82121e"
+version = "0.5.3"
+
 [[deps.Gettext_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Libiconv_jll", "Pkg", "XML2_jll"]
 git-tree-sha1 = "9b02998aba7bf074d14de89f9d37ca24a1a0b046"
@@ -1033,6 +1512,12 @@ deps = ["Artifacts", "Cairo_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll",
 git-tree-sha1 = "129acf094d168394e80ee1dc4bc06ec835e510a3"
 uuid = "2e76f6c2-a576-52d4-95c1-20adfe4de566"
 version = "2.8.1+1"
+
+[[deps.Hungarian]]
+deps = ["LinearAlgebra", "SparseArrays"]
+git-tree-sha1 = "4f84db415ccb0ea750b10738bfecdd55388fd1b6"
+uuid = "e91730f6-4275-51fb-a7a0-7064cfbd3b39"
+version = "0.7.0"
 
 [[deps.HypergeometricFunctions]]
 deps = ["DualNumbers", "LinearAlgebra", "OpenLibm_jll", "SpecialFunctions"]
@@ -1363,6 +1848,12 @@ version = "0.5.13"
 deps = ["Base64"]
 uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
 
+[[deps.MathOptInterface]]
+deps = ["BenchmarkTools", "CodecBzip2", "CodecZlib", "DataStructures", "ForwardDiff", "JSON", "LinearAlgebra", "MutableArithmetics", "NaNMath", "OrderedCollections", "PrecompileTools", "Printf", "SparseArrays", "SpecialFunctions", "Test", "Unicode"]
+git-tree-sha1 = "e2ae8cf5ac6daf5a3959f7f6ded9c2028b61d09d"
+uuid = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+version = "1.25.1"
+
 [[deps.MbedTLS]]
 deps = ["Dates", "MbedTLS_jll", "MozillaCACerts_jll", "NetworkOptions", "Random", "Sockets"]
 git-tree-sha1 = "c067a280ddc25f196b5e7df3877c6b226d390aaf"
@@ -1579,6 +2070,16 @@ version = "1.4.1"
 [[deps.Printf]]
 deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[[deps.Profile]]
+deps = ["Printf"]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+
+[[deps.ProgressMeter]]
+deps = ["Distributed", "Printf"]
+git-tree-sha1 = "00099623ffee15972c16111bcf84c58a0051257c"
+uuid = "92933f4c-e287-5a05-a399-4b506db050ca"
+version = "1.9.0"
 
 [[deps.Qt6Base_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Fontconfig_jll", "Glib_jll", "JLLWrappers", "Libdl", "Libglvnd_jll", "OpenSSL_jll", "Vulkan_Loader_jll", "Xorg_libSM_jll", "Xorg_libXext_jll", "Xorg_libXrender_jll", "Xorg_libxcb_jll", "Xorg_xcb_util_cursor_jll", "Xorg_xcb_util_image_jll", "Xorg_xcb_util_keysyms_jll", "Xorg_xcb_util_renderutil_jll", "Xorg_xcb_util_wm_jll", "Zlib_jll", "libinput_jll", "xkbcommon_jll"]
@@ -2341,15 +2842,19 @@ version = "1.4.1+1"
 
 # ╔═╡ Cell order:
 # ╠═926b344c-b856-11ee-05b6-0bccef981842
-# ╠═93112f7f-f0a5-47b7-87bc-faa1ac6b5cd1
 # ╟─f726bc65-e8c3-4f1c-90da-2836bfb90700
 # ╟─08185ce1-1003-4198-9914-396f9394c392
 # ╟─a020dd76-a9cb-4b41-836b-1f43218d2346
 # ╟─f530161f-6543-4f53-914e-f68ff54d2b29
+# ╟─6e3ba0eb-7712-4f2d-9f34-9a7b4b141b81
+# ╟─e8a8d193-02c5-4903-96a4-969de841232a
 # ╟─ac6e1109-c85f-49ca-b811-04aad7028939
-# ╟─28808acb-0787-48b9-a5f8-80d521671a5e
-# ╟─afc406c8-46be-4ca3-bf15-745fa4d89a4a
+# ╟─87ca85ad-d1cf-4707-859b-268f647a15c8
 # ╟─027480a5-6a05-44e5-8cb8-fc6d256af6c2
+# ╟─605c2a9f-08c9-4b6f-83d5-665b287b5050
+# ╟─8de5f9c3-1e1e-499f-8953-4cbebdc764ec
+# ╠═93112f7f-f0a5-47b7-87bc-faa1ac6b5cd1
+# ╟─afc406c8-46be-4ca3-bf15-745fa4d89a4a
 # ╟─e3f78193-69d6-4f11-afd9-6773881be346
 # ╟─063d5e2f-ad5b-4109-8f4f-03fb7a573c1a
 # ╠═e02aab59-e35d-4733-b500-363bf0f089df
@@ -2386,27 +2891,84 @@ version = "1.4.1+1"
 # ╟─752306ff-9f97-4297-a1c7-da743830f680
 # ╟─3cb84640-dcbf-4136-8959-24f1ad7c0e13
 # ╠═eceddefd-eaf7-4253-9fea-29dcfc1cf6df
+# ╠═70009850-6399-4926-a1ce-f973ecd14bb1
 # ╠═491e38a0-9c22-4f10-bb43-1ae651bcd5f8
 # ╟─c0083a70-507a-4e0a-9a6f-d26d88e72bb2
+# ╟─e237995d-b5b2-460e-9a83-a80e56b781f4
 # ╟─14cacfe2-6489-4538-b416-bcf9432d4ab2
-# ╠═0e0c98b1-9592-4734-9985-cc80b37843f1
+# ╟─edda66ac-3770-4ea6-bd50-3b984613ea32
+# ╟─a0e01618-1385-4dc8-8a7c-a42a0cd06ab0
+# ╟─3bb29eed-9554-4ff1-bc91-1a1e28090322
+# ╟─b69ce643-a538-4d1e-bff7-377f19a0d8b3
+# ╟─65f3285a-3d92-432c-ac6d-04eb8e04fb3b
+# ╟─b6dae6d4-0c65-40d8-a95d-5b023e703b10
+# ╟─bedfb759-fb50-4d50-abfd-9e4925c53d69
 # ╠═f9e8fccd-d4d9-4c5e-9a77-0c131eba5fe8
 # ╠═5004b68d-263f-45c5-a8cd-a0726709c294
 # ╠═9543aa78-73e4-43c8-8041-4c5afa53f4ed
+# ╟─f2cfd2fb-b58c-4146-8a35-62824b8f9eb5
+# ╟─13a4e329-3f5f-4ab3-b460-ce3a333f3063
+# ╠═752adf10-cb29-48ec-abc6-f4efa633b78c
+# ╟─081f54e7-56f9-41d4-b48e-fe2f99c76897
+# ╟─0ee6c0f0-254a-43ff-88c0-96318af82cd6
+# ╠═be9d938f-9a8f-4fde-94bc-5acd8739b437
+# ╟─3ba4d758-f9e8-499e-a004-6d195eab3410
+# ╟─33797756-2ec6-44d8-82c0-3bc5ad1f65be
+# ╠═aabd4bdc-dbee-4801-a6ff-ad789151320e
+# ╠═9035a994-e339-459c-96a2-9ba640b48b40
+# ╟─1bdece17-462b-4e48-9da6-ad6032d86e0a
+# ╟─e6432ae9-7779-4666-857a-58141964cca1
+# ╟─b87768e2-92e8-4486-ab97-a7196b70eeb6
+# ╟─618628d1-ca9a-4211-b546-2f3589dd6457
+# ╟─8cc02b8c-6554-4b18-bf23-561ffb3f97bb
+# ╠═462c2a2d-310b-4091-bb49-1bf13ed120d3
+# ╠═83ba9e3f-a4eb-4f68-9e78-45f1986f4a5a
+# ╠═73f33c4c-4e0d-4e0e-9f03-93f3ad1bc9f7
+# ╠═4063f211-5946-49c0-8d7b-e550aa115cb2
+# ╟─05845c55-8af1-483d-8294-9e266c2db405
+# ╟─27cf0c8c-b6d8-4e25-9625-c4dbcf0c25de
+# ╟─780c72b0-d038-4577-b7fa-0a85514a0762
+# ╟─7ab27251-1648-473c-a642-1a82f10adc3f
+# ╠═aa6a00f3-10d2-44f4-b989-999879bf83c7
+# ╠═96559255-b701-4303-b7de-d8d2fb5c4714
+# ╠═df101930-43d6-4e5c-ab2d-ad496ff7c7a6
+# ╟─7078b24c-75bd-43bc-b234-091a68ed7e76
+# ╟─f3cc5d70-fd3a-4246-8b45-83ac12943978
+# ╟─b6a966b6-d3e2-4a79-8ef5-d70bbec9379a
+# ╠═4dac9f6e-9d53-4e52-946b-f149a99669ec
+# ╠═9251f9ba-af9a-4e3d-aaf6-25b66191c5aa
+# ╟─68ee2b00-39b3-425d-87be-ec9ec445dcea
+# ╟─24716999-4293-4f47-901f-fc3fae2b4324
+# ╟─1034c7c6-1fa2-4307-af58-a65845dc929b
+# ╟─c7d03fde-549d-4ef8-9469-f5561ef4a69d
 # ╟─69cb393b-f212-480d-91df-05f32cb82271
-# ╠═ce2c2894-683d-4f8e-9ed2-38bd27caf0f1
-# ╠═456447fd-e6d6-45e9-b742-21d002da31fb
-# ╠═4fbb9952-e03f-475c-adfd-134e397d5ceb
+# ╟─7fcbb3e2-eff2-412e-a66a-295b8cb80440
+# ╟─5c7fb170-a672-4887-a9f8-f72514d583d7
+# ╟─5971446a-9ae4-4ef3-a709-076c15e79b67
+# ╟─aa779ec8-9d01-475f-90bf-b55e6c2d280d
+# ╟─15b07f2c-57a5-4692-8a1e-15af48d56439
+# ╟─048d5f9d-22e8-4d33-91c5-0492ee202dd6
+# ╟─81a9567d-9d43-4df0-9f90-b27dc2e4669b
 # ╟─2d030f85-d8aa-43c3-9c33-01d0e22d6100
 # ╟─0619bd1d-2353-4e5b-9d84-2988aa5d2074
+# ╟─f66b99af-6215-4b36-baed-9cb77ae99d4f
+# ╟─b1fc612f-5482-4ed9-a1d9-4c30dd7ca87d
 # ╟─d72523a8-51d6-4f4b-bf69-393c020b2cef
-# ╠═0527adb6-22dd-4ca2-9105-a5babf06e5ba
-# ╠═6b7120c5-e726-4752-8858-cc49d5639964
-# ╠═6552f277-4bf2-4f63-a331-80401c2392e6
-# ╠═876d8fe4-0cf9-44c7-ad79-5f1ab9e82ffe
-# ╠═714e3e26-7b33-41c6-a0a7-5646e42f2567
-# ╠═e9bd63ab-abe0-4a76-8742-fcbd36c935aa
-# ╠═1c527603-b6b8-4f9b-9f03-9d4ccace7e06
-# ╠═2def6ea8-2790-4877-a221-14fbc5c2519c
+# ╟─0527adb6-22dd-4ca2-9105-a5babf06e5ba
+# ╟─6b7120c5-e726-4752-8858-cc49d5639964
+# ╟─6552f277-4bf2-4f63-a331-80401c2392e6
+# ╟─876d8fe4-0cf9-44c7-ad79-5f1ab9e82ffe
+# ╟─714e3e26-7b33-41c6-a0a7-5646e42f2567
+# ╟─e9bd63ab-abe0-4a76-8742-fcbd36c935aa
+# ╟─1c527603-b6b8-4f9b-9f03-9d4ccace7e06
+# ╟─2def6ea8-2790-4877-a221-14fbc5c2519c
+# ╟─7f1733f5-962a-43a5-9330-f4b58c1dff9f
+# ╟─06554187-bcda-452c-97f8-23f55698a235
+# ╟─7c210666-0c05-4309-8f28-81793ceb8087
+# ╟─e7b33a1e-07e2-4cb9-baaf-9b753cc0bf8f
+# ╟─5c56abb4-07ed-4655-bc07-92485dd30d6a
+# ╟─f35ed97d-ce20-4b6c-bf58-7b34d5cf0031
+# ╟─c0d183c4-dee0-4465-a25b-01284654e1a1
+# ╟─71c4d2de-a653-4a03-8eec-98141b6d9be0
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
